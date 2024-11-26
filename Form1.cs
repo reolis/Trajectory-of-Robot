@@ -20,7 +20,7 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
         public static UDPServer server;
         public static Bitmap bitmap;
         public static Bitmap MiniMap;
-        public int threshold;
+        public static int threshold = 1;
 
         static int count = 0;
         static int oldCount = 0;
@@ -264,15 +264,44 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
             }
         }
 
+        public class LineSegment
+        {
+            public PointF Start { get; }
+            public PointF End { get; }
+
+            public LineSegment(PointF start, PointF end)
+            {
+                Start = start;
+                End = end;
+            }
+
+            public override bool Equals(object obj)
+            {
+                if (obj is LineSegment other)
+                {
+                    // Сравнение с учетом обратных сегментов
+                    return (Start == other.Start && End == other.End) || (Start == other.End && End == other.Start);
+                }
+                return false;
+            }
+
+            public override int GetHashCode()
+            {
+                // Уникальный хэш для сегмента (независимо от порядка точек)
+                return Start.GetHashCode() ^ End.GetHashCode();
+            }
+        }
+
         public class Visualization
         {
             public Graphics Graphics;
-            public Bitmap MiniMap = new Bitmap(410, 280);
+            public static Bitmap MiniMap = new Bitmap(410, 280);
             public PointF RobotPosition = new PointF(205, 140); // Позиция робота на экране (фиксированная)
             public float RobotDirection = 1;
 
             private List<PointF> Trajectory = new List<PointF>();
             private List<PointF> Obstacles = new List<PointF>();
+            private List<PointF> ObstaclesState = new List<PointF>();
             private List<PointF> PreviousObstacles = new List<PointF>();
             private List<PointF> Walls = new List<PointF>(); // Список для стен
             private List<PointF> ImgWalls = new List<PointF>();
@@ -281,6 +310,62 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
             private int previousRightEncoder = 0; // Предыдущее значение энкодера правого колеса
 
             private PointF FixedRobotPosition = new PointF(205, 140); // Фиксированная точка робота на экране
+
+            private List<Tuple<PointF, PointF>> WallSegments = new List<Tuple<PointF, PointF>>();
+            private const int MapWidth = 100; // Ширина матрицы
+            private const int MapHeight = 70; // Высота матрицы
+            private int[,] MapMatrix = new int[MapWidth, MapHeight];
+            private const int CellSize = 4; // Размер клетки в пикселях на мини-карте
+            private Bitmap StaticObstacleLayer = new Bitmap(410, 280);
+
+            private Point ConvertToMatrixIndex(PointF worldPoint)
+            {
+                int xIndex = (int)((worldPoint.X + MapWidth / 2) / CellSize);
+                int yIndex = (int)((worldPoint.Y + MapHeight / 2) / CellSize);
+
+                xIndex = Clamp(xIndex, 0, MapWidth - 1);
+                yIndex = Clamp(yIndex, 0, MapHeight - 1);
+
+                return new Point(xIndex, yIndex);
+            }
+
+            public static int Clamp(int value, int min, int max)
+            {
+                if (value < min) return min;
+                if (value > max) return max;
+                return value;
+            }
+
+
+            private void UpdateWallsFromSensors(int[] distances, float direction)
+            {
+                for (int i = 0; i < distances.Length; i++)
+                {
+                    float angle = direction + i * 45; // Предположим, что датчики расположены через 45°
+                    float angleRad = angle * (float)Math.PI / 180;
+
+                    float x = RobotPosition.X + distances[i] * (float)Math.Cos(angleRad);
+                    float y = RobotPosition.Y + distances[i] * (float)Math.Sin(angleRad);
+
+                    Point matrixIndex = ConvertToMatrixIndex(new PointF(x, y));
+                    MapMatrix[matrixIndex.X, matrixIndex.Y] = 1; // Помечаем как стену
+                }
+            }
+
+            private void DrawLabyrinth(Graphics g)
+            {
+                for (int x = 0; x < MapWidth; x++)
+                {
+                    for (int y = 0; y < MapHeight; y++)
+                    {
+                        if (MapMatrix[x, y] == 1) // Если ячейка занята
+                        {
+                            g.FillRectangle(Brushes.DarkRed, x * CellSize, y * CellSize, CellSize, CellSize);
+                        }
+                    }
+                }
+            }
+
 
             public void CalculateDistance(float[] distances)
             {
@@ -314,7 +399,7 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
             {
                 // Создаем графический контекст для мини-карты
                 Graphics g = Graphics.FromImage(MiniMap);
-                g.Clear(Color.Black); // Очищаем мини-карту
+                g.Clear(Color.White); // Очищаем мини-карту
 
                 // Центр карты
                 float centerX = MiniMap.Width / 2;
@@ -323,6 +408,12 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
 
                 UpdatePosition(UDPServer.re, UDPServer.le, true);
 
+                foreach (var obstacle in ObstaclesState)
+                {
+                    PointF adjustedObstacle = new PointF(obstacle.X - RobotPosition.X, obstacle.Y - RobotPosition.Y);
+                    g.FillRectangle(Brushes.Lime, adjustedObstacle.X * scale - 3, adjustedObstacle.Y * scale - 3, 6, 6);
+                }
+
                 // Рисуем препятствия
                 foreach (var obstacle in Obstacles)
                 {
@@ -330,12 +421,11 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
                     g.FillRectangle(Brushes.Red, adjustedObstacle.X * scale - 3, adjustedObstacle.Y * scale - 3, 6, 6);
                 }
 
-                // Отрисовываем траекторию с увеличенным масштабом
-                // Отрисовываем все точки траектории
+                // Рисуем траекторию
                 foreach (var point in Trajectory)
                 {
                     PointF miniPoint = new PointF(point.X - RobotPosition.X, point.Y - RobotPosition.Y);
-                    g.FillEllipse(Brushes.Blue, miniPoint.X * 30 * scale - 3, miniPoint.Y * 30 * scale - 3, 4, 4);
+                    g.FillEllipse(Brushes.Blue, miniPoint.X * 30 * scale, miniPoint.Y * 30 * scale, 4, 4);
                 }
 
                 // Текущее положение робота
@@ -345,6 +435,59 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
             }
 
 
+            private Point GetGridCell(PointF position, float cellSize)
+            {
+                return new Point(
+                    (int)Math.Floor(position.X / cellSize),
+                    (int)Math.Floor(position.Y / cellSize)
+                );
+            }
+
+
+            //public Bitmap DrawMiniMap()
+            //{
+            //    // Создаем графический контекст для мини-карты
+            //    Graphics g = Graphics.FromImage(MiniMap);
+            //    g.Clear(Color.Black); // Очищаем мини-карту
+
+            //    // Центр мини-карты
+            //    float centerX = MiniMap.Width / 2;
+            //    float centerY = MiniMap.Height / 2;
+            //    g.TranslateTransform(centerX, centerY);
+
+            //    // Масштаб отображения
+            //    float wallSize = 6; // Размер квадрата для стены
+            //    float scale = Visualization.scale;
+
+            //    // Отрисовка стен
+            //    foreach (var wall in Walls)
+            //    {
+            //        // Переводим координаты стены относительно позиции робота
+            //        PointF adjustedWall = new PointF(
+            //            (wall.X - RobotPosition.X) * scale,
+            //            (wall.Y - RobotPosition.Y) * scale
+            //        );
+
+            //        // Рисуем квадрат, представляющий стену
+            //        g.FillRectangle(Brushes.DarkRed, adjustedWall.X - wallSize / 2, adjustedWall.Y - wallSize / 2, wallSize, wallSize);
+            //    }
+
+            //    // Рисуем траекторию робота
+            //    foreach (var point in Trajectory)
+            //    {
+            //        PointF adjustedPoint = new PointF(
+            //            (point.X - RobotPosition.X) * scale,
+            //            (point.Y - RobotPosition.Y) * scale
+            //        );
+            //        g.FillEllipse(Brushes.Blue, adjustedPoint.X - 2, adjustedPoint.Y - 2, 4, 4);
+            //    }
+
+            //    // Рисуем текущую позицию робота
+            //    g.FillEllipse(Brushes.Purple, -5, -5, 10, 10);
+
+            //    return MiniMap;
+            //}
+
 
             // Функция для масштабирования точки без учета смещения
             private PointF ScalePoint(PointF point, float scale)
@@ -353,37 +496,6 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
                 float scaledY = point.Y * scale; // Масштабируем координату Y
                 return new PointF(scaledX, scaledY);
             }
-
-            private void UpdateWalls(float threshold)
-            {
-                ImgWalls.Clear(); // Очищаем старые стены для рисования на мини-карте
-
-                // Усредняем координаты между предыдущими и текущими препятствиями
-                for (int i = 0; i < Obstacles.Count; i++)
-                {
-                    PointF previous = (i < PreviousObstacles.Count) ? PreviousObstacles[i] : Obstacles[i]; // Если нет предыдущих данных, используем текущие
-                    PointF current = Obstacles[i];
-
-                    // Проверяем, не превышает ли расстояние между текущими и предыдущими координатами порог
-                    float distance = (float)Math.Sqrt(Math.Pow(current.X - previous.X, 2) + Math.Pow(current.Y - previous.Y, 2));
-
-                    if (distance <= threshold)
-                    {
-                        // Усредняем координаты
-                        PointF wall = new PointF(
-                            (previous.X + current.X) / 2,
-                            (previous.Y + current.Y) / 2
-                        );
-
-                        ImgWalls.Add(wall); // Добавляем усредненные стены для рисования на мини-карте
-                        Walls.Add(wall); // Также добавляем в Walls для заливки
-                    }
-                }
-
-                // Обновляем список предыдущих препятствий для следующего вызова
-                PreviousObstacles = new List<PointF>(Obstacles);
-            }
-
 
             // Метод для перевода координат в масштаб мини-карты
             private PointF ScalePoint(PointF point, float scale, Rectangle miniMapRect)
@@ -403,15 +515,15 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
 
                 using (Graphics g = Graphics.FromImage(view))
                 {
-                    g.Clear(Color.Black);
+                    g.Clear(Color.White);
 
                     // Расчет смещения относительно фиксированной позиции робота
                     PointF translation = new PointF(FixedRobotPosition.X - RobotPosition.X, FixedRobotPosition.Y - RobotPosition.Y);
 
-                    if (Walls.Count > 0)
-                    {
-                        FillSpaceToWalls(g, translation);
-                    }
+                    //if (Walls.Count > 0)
+                    //{
+                    //    FillSpaceToWalls(g, translation);
+                    //}
 
                     // Рисуем препятствия
                     foreach (var point in Obstacles)
@@ -427,47 +539,6 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
                 return view;
             }
 
-            private void FillSpaceToWalls(Graphics g, PointF translation)
-            {
-                if (Walls != null && Walls.Count > 0)
-                {
-                    // Получаем углы, под которыми находятся препятствия
-                    List<float> angles = new List<float> { 0, 45, 90, 135, 180, -45, -90, -135 };
-
-                    // Проходим по каждому препятствию
-                    for (int i = 0; i < Walls.Count; i++)
-                    {
-                        PointF currentWall = TranslatePoint(Walls[i], translation);
-
-                        // Угол, под которым находится текущее препятствие
-                        float angle = angles[i % angles.Count]; // Используем модуль для повторения углов
-
-                        // Определяем следующую стену для создания сектора
-                        PointF nextWall;
-                        if (i + 1 < Walls.Count)
-                        {
-                            nextWall = TranslatePoint(Walls[i + 1], translation);
-                        }
-                        else
-                        {
-                            // Если это последнее препятствие, замыкаем с первым
-                            nextWall = TranslatePoint(Walls[0], translation);
-                        }
-
-                        // Создаем точки для заполнения пространства (треугольник)
-                        PointF[] points = new PointF[]
-                        {
-                FixedRobotPosition, // Центр робота
-                currentWall,        // Текущая стена
-                nextWall            // Следующая стена
-                        };
-
-                        // Рисуем заполнение треугольника
-                        g.FillPolygon(Brushes.LightBlue, points);
-                    }
-                }
-            }
-
             private bool IsAtStartingPosition(float threshold = 5.0f)
             {
                 // Вычисляем расстояние от текущей позиции робота до начальной позиции
@@ -477,8 +548,6 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
                 // Если расстояние меньше порога, возвращаем true
                 return distance < threshold;
             }
-
-            // Метод для перевода точек относительно неподвижной позиции робота
             private PointF TranslatePoint(PointF point, PointF translation)
             {
                 return new PointF(point.X + translation.X, point.Y + translation.Y);
@@ -489,7 +558,7 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
                 foreach (var wall in Walls)
                 {
                     PointF translatedWall = TranslatePoint(wall, translation);
-                    g.FillRectangle(Brushes.Red, translatedWall.X - 3, translatedWall.Y - 3, 6, 6); // Рисуем стены красным цветом
+                    g.FillRectangle(Brushes.DarkRed, translatedWall.X - 3, translatedWall.Y - 3, 6, 6); // Рисуем стены красным цветом
                 }
             }
 
@@ -557,41 +626,119 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
                 Trajectory.Add(new PointF(newX, newY));
             }
 
+            public static Bitmap WallMap = new Bitmap(410, 280); // Отдельный слой для стен
+            private Graphics gWallMap = Graphics.FromImage(WallMap); // Графика для рисования на WallMap
 
-            public void DetectObstaclesFromSensors(int threshold, params int[] distances)
+
+            public Bitmap DetectObstaclesFromSensors(int threshold, params int[] distances)
             {
-                Obstacles.Clear();
-                ImgWalls.Clear();
-                Walls.Clear();
+                Graphics g = Graphics.FromImage(MiniMap);
+                g.Clear(Color.White);
 
-                // Углы, соответствующие каждому дальномеру
-                float[] angles = { 0, 45, 90, 135, 180, -135, -90, -45 };
+                // Центр карты (локальная система координат)
+                float centerX = MiniMap.Width / 2;
+                float centerY = MiniMap.Height / 2;
+                g.TranslateTransform(centerX, centerY);
 
-                for (int i = 0; i < distances.Length; i++)
+                // Добавить новое препятствие
+                PointF AddObstacle(float distance, float angle)
                 {
-                    if (distances[i] < threshold)
+                    if (distance < threshold)
                     {
-                        // Получаем позицию препятствия по данным дальномера и углу
-                        PointF obstacle = GetObstaclePosition(distances[i], RobotDirection + angles[i]);
+                        // Глобальные координаты препятствия
+                        var obstacle = new PointF(
+                            RobotPosition.X + distance * (float)Math.Cos(angle * Math.PI / 180),
+                            RobotPosition.Y + distance * (float)Math.Sin(angle * Math.PI / 180)
+                        );
 
-                        if (!Obstacles.Contains(obstacle))
+                        // Проверка на уникальность
+                        if (!Obstacles.Any(p => Math.Abs(p.X - obstacle.X) < 0.1 && Math.Abs(p.Y - obstacle.Y) < 0.1))
                         {
                             Obstacles.Add(obstacle);
-                            ImgWalls.Add(obstacle);
-                            Walls.Add(obstacle);
                         }
+
+                        return obstacle;
                     }
+                    return new PointF(0, 0);
                 }
 
-                UpdateWalls(10.0f);
+                // Добавляем препятствия из всех датчиков
+                var d0 = AddObstacle(distances[0], RobotDirection);
+                var d1 = AddObstacle(distances[1], RobotDirection + 45);
+                var d2 = AddObstacle(distances[2], RobotDirection + 90);
+                var d3 = AddObstacle(distances[3], RobotDirection + 135);
+                var d4 = AddObstacle(distances[4], RobotDirection + 180);
+                var d5 = AddObstacle(distances[5], RobotDirection - 135);
+                var d6 = AddObstacle(distances[6], RobotDirection - 90);
+                var d7 = AddObstacle(distances[7], RobotDirection - 45);
+
+                PointF[] points = { d0, d1, d2, d3, d4, d5, d6, d7 };
+
+                // Отрисовка препятствий
+                foreach (var obstacle in Obstacles)
+                {
+                    // Локальные координаты относительно робота
+                    PointF adjustedObstacle = new PointF(
+                        (obstacle.X - RobotPosition.X) * scale,
+                        (obstacle.Y - RobotPosition.Y) * scale
+                    );
+
+                    // Рисуем точку
+                    g.FillRectangle(Brushes.Red, adjustedObstacle.X - 3, adjustedObstacle.Y - 3, 6, 6);
+                }
+
+                foreach (var point in points)
+                {
+                    PointF miniPoint = new PointF(point.X - RobotPosition.X, point.Y - RobotPosition.Y);
+                    g.FillEllipse(Brushes.DarkBlue, miniPoint.X * 30 * scale, miniPoint.Y * 30 * scale, 4, 4);
+                }
+
+                // Рисуем траекторию
+                foreach (var point in Trajectory)
+                {
+                    PointF miniPoint = new PointF(
+                        (point.X - RobotPosition.X) * scale,
+                        (point.Y - RobotPosition.Y) * scale
+                    );
+                    g.FillEllipse(Brushes.Blue, miniPoint.X - 2, miniPoint.Y - 2, 4, 4);
+                }
+
+                // Рисуем траекторию
+                foreach (var point in Trajectory)
+                {
+                    PointF miniPoint = new PointF(point.X - RobotPosition.X, point.Y - RobotPosition.Y);
+                    g.FillEllipse(Brushes.Blue, miniPoint.X * 30 * scale, miniPoint.Y * 30 * scale, 4, 4);
+                }
+
+                // Текущее положение робота
+                g.FillEllipse(Brushes.Purple, -5, -5, 10, 10);
+
+                return MiniMap;
             }
 
 
-            //public void ResetPositionAfterTurn()
-            //{
-            //    RobotPosition = FixedRobotPosition;
-            //    Trajectory.Clear();
-            //}
+            private void UpdateWalls(float threshold)
+            {
+                for (int i = 0; i < Obstacles.Count; i++)
+                {
+                    PointF previous = (i < PreviousObstacles.Count) ? PreviousObstacles[i] : Obstacles[i];
+                    PointF current = Obstacles[i];
+
+                    float distance = (float)Math.Sqrt(Math.Pow(current.X - previous.X, 2) + Math.Pow(current.Y - previous.Y, 2));
+
+                    if (distance <= threshold)
+                    {
+                        PointF wall = new PointF(
+                            (previous.X + current.X / 2),
+                            (previous.Y + current.Y / 2)
+                        );
+
+                        Walls.Insert(0, wall);
+                    }
+                }
+
+                PreviousObstacles = new List<PointF>(Obstacles);
+            }
 
             private PointF GetObstaclePosition(float distance, float angle)
             {
@@ -731,7 +878,7 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
             double angleInRadians = omega * deltaTime;
 
             // Переводим радианы в градусы, если нужно
-            double angleInDegrees = angleInRadians * (180.0 / Math.PI);
+            double angleInDegrees = angleInRadians /** (float)Math.PI / 180*/;
 
             return angleInDegrees;  // Возвращаем угол в градусах
         }
@@ -815,10 +962,11 @@ namespace Krasnyanskaya221327_Lab03_Sem5_Ver1
                 richTextBox1.SelectionStart = richTextBox1.Text.Length;
                 richTextBox1.ScrollToCaret();
 
-                visualization.DetectObstaclesFromSensors(threshold, UDPServer.d0, UDPServer.d1, UDPServer.d2, UDPServer.d3,
-                        UDPServer.d4, UDPServer.d5, UDPServer.d6, UDPServer.d7);
-                bitmap = visualization.DrawRobot((int)CalculateTurnAngle(Robot.Commands["B"], 1, count / 10));
-                MiniMap = visualization.DrawMiniMap();
+                Graphics g = Graphics.FromImage(Visualization.WallMap);
+                
+                g.DrawImage(Visualization.WallMap, 410, 208);
+                bitmap = visualization.DrawRobot((int)CalculateTurnAngle(-Robot.Commands["B"], 0.001, count / 10000));
+                //MiniMap = visualization.DrawMiniMap();
                 count++;
                 richTextBox1.Text = "\r\n" + visualization.RobotPosition.X.ToString() + "; " + visualization.RobotPosition.Y.ToString();
 
